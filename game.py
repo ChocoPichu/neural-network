@@ -31,7 +31,7 @@ runner_ai_output_x = 1
 runner_ai_output_y = -1
 
 # Ai vision, radar style. So 8 lines coming out of the circle at 45 degree angles. maximum distance is 300 px, and current distance is 0
-MAX_RADAR_DIST = 300
+MAX_RADAR_DIST = 200
 STEP_SIZE = 2 # Seems like if you do it 5 or more, it would go through the chaser and the runner, and not collide
 NUM_RAYS = 8
 current_dist = 0
@@ -43,6 +43,12 @@ chaser_angle = 0
 runner_angle = 180
 turn_speed = 3
 
+# Loading the first map
+map_surface_1 = pygame.image.load("maps/map.png").convert_alpha()
+
+# Create a mask of solid pixels, so everything which is not transparent becomes solid.
+map_mask = pygame.mask.from_surface(map_surface_1)
+
 # Main screen loop
 running = True
 while running:
@@ -53,7 +59,14 @@ while running:
     # Rotate direction vector
     chaser_dir.rotate_ip(chaser_ai_output_y * turn_speed)
     # AI movement logic for chaser
-    chaser_pos += chaser_dir * (chaser_ai_output_x * chaser_speed)
+    # Calculate where the chaser wants to move
+    chaser_next_pos = chaser_pos + chaser_dir * (chaser_ai_output_x * chaser_speed)
+    cnx = int(chaser_next_pos.x)
+    cny = int(chaser_next_pos.y)
+    # Only move if the next pixel isn't inside a solid wall
+    if 0 <= cnx < WIDTH and 0 <= cny < HEIGHT:
+        if not map_mask.get_at((cnx, cny)):
+            chaser_pos = chaser_next_pos
     # keep within boundaries
     chaser_pos.x = max(10, min(WIDTH - 10, chaser_pos.x))
     chaser_pos.y = max(10, min(WIDTH - 10, chaser_pos.y))
@@ -61,12 +74,20 @@ while running:
     # Rotate direction vector
     runner_dir.rotate_ip(runner_ai_output_y * turn_speed)
     # Runner AI movement logic
-    runner_pos += runner_dir * (runner_ai_output_x * runner_speed)
+    # Calculate where the runner wants to move
+    runner_next_pos = runner_pos + runner_dir * (runner_ai_output_x * runner_speed)
+    rnx = int(runner_next_pos.x)
+    rny = int(runner_next_pos.y)
+    # Only move if the next pixel isn't inside a solid wall
+    if 0 <= cnx < WIDTH and 0 <= rny < HEIGHT:
+        if not map_mask.get_at((rnx, rny)):
+            runner_pos = runner_next_pos
     runner_pos.x = max(10, min(WIDTH - 10, runner_pos.x))
     runner_pos.y = max(10, min(HEIGHT - 10, runner_pos.y))
 
     # Drawing part
     screen.fill('White')
+    screen.blit(map_surface_1, (0, 0))
 
     # Chaser Vision Loop
     for i in range(NUM_RAYS):
@@ -76,9 +97,15 @@ while running:
         while current_dist < MAX_RADAR_DIST:
             current_dist += STEP_SIZE
             chaser_ray_pos = chaser_pos + (ray_dir * current_dist)
+            # convert ray vector cords into integers, for mask lookup
+            chaser_ray_x = int(chaser_ray_pos.x)
+            chaser_ray_y = int(chaser_ray_pos.y)
             # Wall collision check
-            if chaser_ray_pos.x >= WIDTH or chaser_ray_pos.x < 0 or chaser_ray_pos.y >= HEIGHT or chaser_ray_pos.y < 0:
-                break
+            if 0 <= chaser_ray_x < WIDTH and 0 <= chaser_ray_y < HEIGHT:
+                if map_mask.get_at((chaser_ray_x, chaser_ray_y)):
+                    break # hit a wall in the picture
+            else:
+                break # hit the screen border
             # Distance check to runner using .distance_to()
             if chaser_ray_pos.distance_to(runner_pos) < 10:
                 break
@@ -89,12 +116,15 @@ while running:
         # Rotate relative to chaser_dir heading
         ray_dir = chaser_dir.rotate(angle)
         chaser_ray_pos = chaser_pos.copy()
-
         while current_dist < MAX_RADAR_DIST:
             current_dist += STEP_SIZE
             chaser_ray_pos = chaser_pos + (ray_dir * current_dist)
-            if chaser_ray_pos.x >= WIDTH or chaser_ray_pos.x < 0 or chaser_ray_pos.y >= HEIGHT or chaser_ray_pos.y < 0:
-                break
+            chaser_ray_x = int(chaser_ray_pos.x)
+            chaser_ray_y = int(chaser_ray_pos.y)
+            # Wall collision check
+            if 0 <= chaser_ray_x < WIDTH and 0 <= chaser_ray_y < HEIGHT:
+                if map_mask.get_at((chaser_ray_x, chaser_ray_y)):
+                    break  # hit a wall in the picture
             if chaser_ray_pos.distance_to(runner_pos) < 10:
                 break
         pygame.draw.line(screen, (255, 0, 255), chaser_pos, chaser_ray_pos)
@@ -108,9 +138,15 @@ while running:
         while current_dist < MAX_RADAR_DIST:
             current_dist += STEP_SIZE
             runner_ray_pos = runner_pos + (ray_dir * current_dist)
+            # convert ray vector cords into integers, for mask lookup
+            runner_ray_x = int(runner_ray_pos.x)
+            runner_ray_y = int(runner_ray_pos.y)
             # Wall collision check
-            if runner_ray_pos.x >= WIDTH or runner_ray_pos.x < 0 or runner_ray_pos.y >= HEIGHT or runner_ray_pos.y < 0:
-                break
+            if 0 <= runner_ray_x < WIDTH and 0 <= runner_ray_y < HEIGHT:
+                if map_mask.get_at((runner_ray_x, runner_ray_y)):
+                    break # hit a wall in the picture
+            else:
+                break # hit the screen border
             # Distance check to runner using .distance_to()
             if runner_ray_pos.distance_to(chaser_pos) < 10:
                 break
@@ -125,8 +161,13 @@ while running:
         while current_dist < MAX_RADAR_DIST:
             current_dist += STEP_SIZE
             runner_ray_pos = runner_pos + (ray_dir * current_dist)
-            if runner_ray_pos.x >= WIDTH or runner_ray_pos.x < 0 or runner_ray_pos.y >= HEIGHT or runner_ray_pos.y < 0:
-                break
+            # convert ray vector cords into integers, for mask lookup
+            runner_ray_x = int(runner_ray_pos.x)
+            runner_ray_y = int(runner_ray_pos.y)
+            # Wall collision check
+            if 0 <= runner_ray_x < WIDTH and 0 <= runner_ray_y < HEIGHT:
+                if map_mask.get_at((runner_ray_x, runner_ray_y)):
+                    break  # hit a wall in the picture
             if runner_ray_pos.distance_to(chaser_pos) < 10:
                 break
         pygame.draw.line(screen, (255, 0, 255), runner_pos, runner_ray_pos)
