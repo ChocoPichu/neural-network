@@ -97,8 +97,6 @@ while running:
                 break
             if chaser_ray_pos.distance_to(runner_pos) < 10:
                 break
-
-        # Optional: Draw cone rays in yellow/bright green to visually differentiate from radar
         pygame.draw.line(screen, (255, 0, 255), chaser_pos, chaser_ray_pos)
         current_dist = 0
 
@@ -119,12 +117,25 @@ while running:
         pygame.draw.line(screen, (0, 255, 0), runner_pos, runner_ray_pos)
         current_dist = 0
 
+    for angle in VISION_CONE:
+        # Rotate relative to runner_dir heading
+        ray_dir = runner_dir.rotate(angle)
+        runner_ray_pos = runner_pos.copy()
+
+        while current_dist < MAX_RADAR_DIST:
+            current_dist += STEP_SIZE
+            runner_ray_pos = runner_pos + (ray_dir * current_dist)
+            if runner_ray_pos.x >= WIDTH or runner_ray_pos.x < 0 or runner_ray_pos.y >= HEIGHT or runner_ray_pos.y < 0:
+                break
+            if runner_ray_pos.distance_to(chaser_pos) < 10:
+                break
+        pygame.draw.line(screen, (255, 0, 255), runner_pos, runner_ray_pos)
+        current_dist = 0
+
     # Chaser
     pygame.draw.circle(screen, (255, 0, 0), chaser_pos, 10)
-
     # Runner
     pygame.draw.circle(screen, (0, 0, 255), runner_pos, 10)
-
     # update the screen
     pygame.display.flip()
     clock.tick(60)
