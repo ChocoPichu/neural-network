@@ -1,0 +1,132 @@
+import pygame
+import math
+
+pygame.init()
+
+WIDTH = 800
+HEIGHT = 600
+
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Tag")
+clock = pygame.time.Clock()
+
+# Chaser position and directions
+chaser_pos = pygame.math.Vector2(300, 400)
+chaser_dir = pygame.math.Vector2(1, 0)
+chaser_speed = 4
+turn_speed = 3
+
+# Setup (replace runner_x / runner_y)
+runner_pos = pygame.math.Vector2(300, 200)
+runner_dir = pygame.math.Vector2(-1, 0)  # Facing left initially
+runner_speed = 4
+
+# Pretending that these are 2 outputs from the AI brain
+# values between -1 and 1, so I guess the AI uses the tanh graph to move positions.
+# outputs from chaser ai
+chaser_ai_output_x = 1
+chaser_ai_output_y = -1
+# outputs from runner ai
+runner_ai_output_x = 1
+runner_ai_output_y = -1
+
+# Ai vision, radar style. So 8 lines coming out of the circle at 45 degree angles. maximum distance is 300 px, and current distance is 0
+MAX_RADAR_DIST = 300
+STEP_SIZE = 2 # Seems like if you do it 5 or more, it would go through the chaser and the runner, and not collide
+NUM_RAYS = 8
+current_dist = 0
+radar_inputs = []
+VISION_CONE = [-30, -15, -5, 0, 5, 15, 30]
+
+# Ai vision, cone of vision style.
+chaser_angle = 0
+runner_angle = 180
+turn_speed = 3
+
+# Main screen loop
+running = True
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+    # Rotate direction vector
+    chaser_dir.rotate_ip(chaser_ai_output_y * turn_speed)
+    # AI movement logic for chaser
+    chaser_pos += chaser_dir * (chaser_ai_output_x * chaser_speed)
+    # keep within boundaries
+    chaser_pos.x = max(10, min(WIDTH - 10, chaser_pos.x))
+    chaser_pos.y = max(10, min(WIDTH - 10, chaser_pos.y))
+
+    # Rotate direction vector
+    runner_dir.rotate_ip(runner_ai_output_y * turn_speed)
+    # Runner AI movement logic
+    runner_pos += runner_dir * (runner_ai_output_x * runner_speed)
+    runner_pos.x = max(10, min(WIDTH - 10, runner_pos.x))
+    runner_pos.y = max(10, min(HEIGHT - 10, runner_pos.y))
+
+    # Drawing part
+    screen.fill('White')
+
+    # Chaser Vision Loop
+    for i in range(NUM_RAYS):
+        # Rotate ray relative to where the chaser is currently facing
+        ray_dir = chaser_dir.rotate(i * 45)
+        chaser_ray_pos = chaser_pos.copy()
+        while current_dist < MAX_RADAR_DIST:
+            current_dist += STEP_SIZE
+            chaser_ray_pos = chaser_pos + (ray_dir * current_dist)
+            # Wall collision check
+            if chaser_ray_pos.x >= WIDTH or chaser_ray_pos.x < 0 or chaser_ray_pos.y >= HEIGHT or chaser_ray_pos.y < 0:
+                break
+            # Distance check to runner using .distance_to()
+            if chaser_ray_pos.distance_to(runner_pos) < 10:
+                break
+        pygame.draw.line(screen, (0, 255, 0), chaser_pos, chaser_ray_pos)
+        current_dist = 0
+
+    for angle in VISION_CONE:
+        # Rotate relative to chaser_dir heading
+        ray_dir = chaser_dir.rotate(angle)
+        chaser_ray_pos = chaser_pos.copy()
+
+        while current_dist < MAX_RADAR_DIST:
+            current_dist += STEP_SIZE
+            chaser_ray_pos = chaser_pos + (ray_dir * current_dist)
+            if chaser_ray_pos.x >= WIDTH or chaser_ray_pos.x < 0 or chaser_ray_pos.y >= HEIGHT or chaser_ray_pos.y < 0:
+                break
+            if chaser_ray_pos.distance_to(runner_pos) < 10:
+                break
+
+        # Optional: Draw cone rays in yellow/bright green to visually differentiate from radar
+        pygame.draw.line(screen, (255, 0, 255), chaser_pos, chaser_ray_pos)
+        current_dist = 0
+
+    # Vision loop, and drawing rays for runner
+    for i in range(NUM_RAYS):
+        # Rotate ray relative to where the chaser is currently facing
+        ray_dir = runner_dir.rotate(i * 45)
+        runner_ray_pos = runner_pos.copy()
+        while current_dist < MAX_RADAR_DIST:
+            current_dist += STEP_SIZE
+            runner_ray_pos = runner_pos + (ray_dir * current_dist)
+            # Wall collision check
+            if runner_ray_pos.x >= WIDTH or runner_ray_pos.x < 0 or runner_ray_pos.y >= HEIGHT or runner_ray_pos.y < 0:
+                break
+            # Distance check to runner using .distance_to()
+            if runner_ray_pos.distance_to(chaser_pos) < 10:
+                break
+        pygame.draw.line(screen, (0, 255, 0), runner_pos, runner_ray_pos)
+        current_dist = 0
+
+    # Chaser
+    pygame.draw.circle(screen, (255, 0, 0), chaser_pos, 10)
+
+    # Runner
+    pygame.draw.circle(screen, (0, 0, 255), runner_pos, 10)
+
+    # update the screen
+    pygame.display.flip()
+    clock.tick(60)
+
+pygame.quit()
