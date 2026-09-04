@@ -1,5 +1,6 @@
 import pygame
 import math
+import random
 
 pygame.init()
 
@@ -49,7 +50,38 @@ map_surface_1 = pygame.image.load("maps/map.png").convert_alpha()
 # Create a mask of solid pixels, so everything which is not transparent becomes solid.
 map_mask = pygame.mask.from_surface(map_surface_1)
 
-# Main screen loop
+# the game resetting function
+chaser_score = 0
+runner_score = 0
+TIMER = 5 # for now 5 for testing purposes, until spawning in the map boxes is fixed.
+
+font = pygame.font.SysFont("Arial", 20)
+
+def reset_game():
+    global chaser_pos, chaser_dir, runner_pos, runner_dir, start_time
+
+    # Random spawn
+    chaser_random_x = random.randint(1, WIDTH)
+    chaser_random_y = random.randint(1, 500)
+
+    runner_random_x = random.randint(1, WIDTH)
+    runner_random_y = random.randint(1, 500)
+
+    # Reset chaser
+    chaser_pos = pygame.math.Vector2(chaser_random_x, chaser_random_y)
+    chaser_dir = pygame.math.Vector2(1, 0)
+
+    # Reset runner
+    runner_pos = pygame.math.Vector2(runner_random_x, runner_random_y)
+    runner_dir = pygame.math.Vector2(-1, 0)
+
+    start_time = pygame.time.get_ticks()
+
+# resetting the game at the start
+start_time = pygame.time.get_ticks()
+reset_game()
+
+# Main loop
 running = True
 while running:
     for event in pygame.event.get():
@@ -79,7 +111,7 @@ while running:
     rnx = int(runner_next_pos.x)
     rny = int(runner_next_pos.y)
     # Only move if the next pixel isn't inside a solid wall
-    if 0 <= cnx < WIDTH and 0 <= rny < HEIGHT:
+    if 0 <= cnx < WIDTH and 0 <= cny < HEIGHT:
         if not map_mask.get_at((rnx, rny)):
             runner_pos = runner_next_pos
     runner_pos.x = max(10, min(WIDTH - 10, runner_pos.x))
@@ -88,6 +120,20 @@ while running:
     # Drawing part
     screen.fill('White')
     screen.blit(map_surface_1, (0, 0))
+
+    # Win condition, if the chaser manages to touch the runner. Or runner survives the 20 seconds duration
+    elapsed_seconds = (pygame.time.get_ticks() - start_time) / 1000
+    time_remaining = max(0, int(TIMER - elapsed_seconds))
+
+    if chaser_pos.distance_to(runner_pos) < 20:
+        chaser_score += 1
+        print(f"Chaser won. Score, Runner: {runner_score}. Chaser {chaser_score}")
+        reset_game()
+
+    elif time_remaining <= 0:
+        runner_score += 1
+        print(f"Runner survived. Score, Runner: {runner_score}. Chaser {chaser_score}")
+        reset_game()
 
     # Chaser Vision Loop
     for i in range(NUM_RAYS):
@@ -177,6 +223,15 @@ while running:
     pygame.draw.circle(screen, (255, 0, 0), chaser_pos, 10)
     # Runner
     pygame.draw.circle(screen, (0, 0, 255), runner_pos, 10)
+
+    # timer and scoreboard
+    timer_text = font.render(f"Time: {time_remaining}s", True, (0, 0, 0))
+    score_text = font.render(f"Chaser: {chaser_score}  |  Runner: {runner_score}", True, (0, 0, 0))
+
+    screen.blit(timer_text, (WIDTH // 2 - timer_text.get_width() // 2, 10))
+    score_rect = score_text.get_rect(topright=(WIDTH - 10, 10))
+    screen.blit(score_text, score_rect)
+
     # update the screen
     pygame.display.flip()
     clock.tick(60)
