@@ -57,22 +57,30 @@ TIMER = 5 # for now 5 for testing purposes, until spawning in the map boxes is f
 
 font = pygame.font.SysFont("Arial", 20)
 
+def get_random_valid_pos(padding=15):
+    # koroche, this fixes the bug where the guys are spawning inside the walls of the map
+    while True:
+        x = random.randint(padding, WIDTH - padding)
+        y = random.randint(padding, HEIGHT - padding)
+
+        #this makes sure if it's not inside a wall
+        if not map_mask.get_at((x, y)):
+            return pygame.math.Vector2(x, y)
+
 def reset_game():
     global chaser_pos, chaser_dir, runner_pos, runner_dir, start_time
 
-    # Random spawn
-    chaser_random_x = random.randint(1, WIDTH)
-    chaser_random_y = random.randint(1, 500)
-
-    runner_random_x = random.randint(1, WIDTH)
-    runner_random_y = random.randint(1, 500)
-
     # Reset chaser
-    chaser_pos = pygame.math.Vector2(chaser_random_x, chaser_random_y)
+    chaser_pos = get_random_valid_pos()
     chaser_dir = pygame.math.Vector2(1, 0)
 
+    # Loop to make sure runner doesn't spawn inside of the chaser.
+    while True:
+        runner_pos = get_random_valid_pos()
+        if chaser_pos.distance_to(runner_pos) > 100:
+            break
+
     # Reset runner
-    runner_pos = pygame.math.Vector2(runner_random_x, runner_random_y)
     runner_dir = pygame.math.Vector2(-1, 0)
 
     start_time = pygame.time.get_ticks()
@@ -111,7 +119,7 @@ while running:
     rnx = int(runner_next_pos.x)
     rny = int(runner_next_pos.y)
     # Only move if the next pixel isn't inside a solid wall
-    if 0 <= cnx < WIDTH and 0 <= cny < HEIGHT:
+    if 0 <= rnx < WIDTH and 0 <= rny < HEIGHT:
         if not map_mask.get_at((rnx, rny)):
             runner_pos = runner_next_pos
     runner_pos.x = max(10, min(WIDTH - 10, runner_pos.x))
