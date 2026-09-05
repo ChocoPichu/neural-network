@@ -1,6 +1,7 @@
 import pygame
 import math
 import random
+import nnet
 
 pygame.init()
 
@@ -55,6 +56,10 @@ chaser_score = 0
 runner_score = 0
 TIMER = 5 # for now 5 for testing purposes, until spawning in the map boxes is fixed.
 
+# The brains
+chaser_brain = nnet.SimpleNeuralNetwork(15)
+runner_brain = nnet.SimpleNeuralNetwork(15)
+
 font = pygame.font.SysFont("Arial", 20)
 
 def get_random_valid_pos(padding=15):
@@ -96,52 +101,12 @@ while running:
         if event.type == pygame.QUIT:
             running = False
 
-    # Rotate direction vector
-    chaser_dir.rotate_ip(chaser_ai_output_y * turn_speed)
-    # AI movement logic for chaser
-    # Calculate where the chaser wants to move
-    chaser_next_pos = chaser_pos + chaser_dir * (chaser_ai_output_x * chaser_speed)
-    cnx = int(chaser_next_pos.x)
-    cny = int(chaser_next_pos.y)
-    # Only move if the next pixel isn't inside a solid wall
-    if 0 <= cnx < WIDTH and 0 <= cny < HEIGHT:
-        if not map_mask.get_at((cnx, cny)):
-            chaser_pos = chaser_next_pos
-    # keep within boundaries
-    chaser_pos.x = max(10, min(WIDTH - 10, chaser_pos.x))
-    chaser_pos.y = max(10, min(WIDTH - 10, chaser_pos.y))
-
-    # Rotate direction vector
-    runner_dir.rotate_ip(runner_ai_output_y * turn_speed)
-    # Runner AI movement logic
-    # Calculate where the runner wants to move
-    runner_next_pos = runner_pos + runner_dir * (runner_ai_output_x * runner_speed)
-    rnx = int(runner_next_pos.x)
-    rny = int(runner_next_pos.y)
-    # Only move if the next pixel isn't inside a solid wall
-    if 0 <= rnx < WIDTH and 0 <= rny < HEIGHT:
-        if not map_mask.get_at((rnx, rny)):
-            runner_pos = runner_next_pos
-    runner_pos.x = max(10, min(WIDTH - 10, runner_pos.x))
-    runner_pos.y = max(10, min(HEIGHT - 10, runner_pos.y))
-
-    # Drawing part
+    # Drawing part (moved background blit top of frame so ray lines show properly)
     screen.fill('White')
     screen.blit(map_surface_1, (0, 0))
 
-    # Win condition, if the chaser manages to touch the runner. Or runner survives the 20 seconds duration
-    elapsed_seconds = (pygame.time.get_ticks() - start_time) / 1000
-    time_remaining = max(0, int(TIMER - elapsed_seconds))
-
-    if chaser_pos.distance_to(runner_pos) < 20:
-        chaser_score += 1
-        print(f"Chaser won. Score, Runner: {runner_score}. Chaser {chaser_score}")
-        reset_game()
-
-    elif time_remaining <= 0:
-        runner_score += 1
-        print(f"Runner survived. Score, Runner: {runner_score}. Chaser {chaser_score}")
-        reset_game()
+    chaser_inputs = []
+    runner_inputs = []
 
     # Chaser Vision Loop
     for i in range(NUM_RAYS):
@@ -163,6 +128,8 @@ while running:
             # Distance check to runner using .distance_to()
             if chaser_ray_pos.distance_to(runner_pos) < 10:
                 break
+
+        chaser_inputs.append((current_dist / MAX_RADAR_DIST))
         pygame.draw.line(screen, (0, 255, 0), chaser_pos, chaser_ray_pos)
         current_dist = 0
 
@@ -181,6 +148,8 @@ while running:
                     break  # hit a wall in the picture
             if chaser_ray_pos.distance_to(runner_pos) < 10:
                 break
+
+        chaser_inputs.append((current_dist / MAX_RADAR_DIST))
         pygame.draw.line(screen, (255, 0, 255), chaser_pos, chaser_ray_pos)
         current_dist = 0
 
@@ -204,6 +173,8 @@ while running:
             # Distance check to runner using .distance_to()
             if runner_ray_pos.distance_to(chaser_pos) < 10:
                 break
+
+        runner_inputs.append(current_dist / MAX_RADAR_DIST)
         pygame.draw.line(screen, (0, 255, 0), runner_pos, runner_ray_pos)
         current_dist = 0
 
@@ -224,8 +195,57 @@ while running:
                     break  # hit a wall in the picture
             if runner_ray_pos.distance_to(chaser_pos) < 10:
                 break
+
+        runner_inputs.append(current_dist / MAX_RADAR_DIST)
         pygame.draw.line(screen, (255, 0, 255), runner_pos, runner_ray_pos)
         current_dist = 0
+
+    # Pass inputs to neural networks
+    chaser_ai_output_x, chaser_ai_output_y = chaser_brain.forward(chaser_inputs)
+    runner_ai_output_x, runner_ai_output_y = runner_brain.forward(runner_inputs)
+
+    # Rotate direction vector
+    chaser_dir.rotate_ip(chaser_ai_output_y * turn_speed)
+    # AI movement logic for chaser
+    # Calculate where the chaser wants to move
+    chaser_next_pos = chaser_pos + chaser_dir * (chaser_ai_output_x * chaser_speed)
+    cnx = int(chaser_next_pos.x)
+    cny = int(chaser_next_pos.y)
+    # Only move if the next pixel isn't inside a solid wall
+    if 0 <= cnx < WIDTH and 0 <= cny < HEIGHT:
+        if not map_mask.get_at((cnx, cny)):
+            chaser_pos = chaser_next_pos
+    # keep within boundaries
+    chaser_pos.x = max(10, min(WIDTH - 10, chaser_pos.x))
+    chaser_pos.y = max(10, min(HEIGHT - 10, chaser_pos.y))
+
+    # Rotate direction vector
+    runner_dir.rotate_ip(runner_ai_output_y * turn_speed)
+    # Runner AI movement logic
+    # Calculate where the runner wants to move
+    runner_next_pos = runner_pos + runner_dir * (runner_ai_output_x * runner_speed)
+    rnx = int(runner_next_pos.x)
+    rny = int(runner_next_pos.y)
+    # Only move if the next pixel isn't inside a solid wall
+    if 0 <= rnx < WIDTH and 0 <= rny < HEIGHT:
+        if not map_mask.get_at((rnx, rny)):
+            runner_pos = runner_next_pos
+    runner_pos.x = max(10, min(WIDTH - 10, runner_pos.x))
+    runner_pos.y = max(10, min(HEIGHT - 10, runner_pos.y))
+
+    # Win condition, if the chaser manages to touch the runner. Or runner survives the 20 seconds duration
+    elapsed_seconds = (pygame.time.get_ticks() - start_time) / 1000
+    time_remaining = max(0, int(TIMER - elapsed_seconds))
+
+    if chaser_pos.distance_to(runner_pos) < 20:
+        chaser_score += 1
+        print(f"Chaser won. Score, Runner: {runner_score}. Chaser {chaser_score}")
+        reset_game()
+
+    elif time_remaining <= 0:
+        runner_score += 1
+        print(f"Runner survived. Score, Runner: {runner_score}. Chaser {chaser_score}")
+        reset_game()
 
     # Chaser
     pygame.draw.circle(screen, (255, 0, 0), chaser_pos, 10)
@@ -233,7 +253,7 @@ while running:
     pygame.draw.circle(screen, (0, 0, 255), runner_pos, 10)
 
     # timer and scoreboard
-    timer_text = font.render(f"Time: {time_remaining}s", True, (0, 0, 0))
+    timer_text = font.render(f"Time: {time_remaining}", True, (0, 0, 0))
     score_text = font.render(f"Chaser: {chaser_score}  |  Runner: {runner_score}", True, (0, 0, 0))
 
     screen.blit(timer_text, (WIDTH // 2 - timer_text.get_width() // 2, 10))
