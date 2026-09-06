@@ -1,266 +1,432 @@
 import pygame
-import math
 import random
+import copy
+import pickle
+import os
+import glob
 import nnet
+import config
+from training import Runner, Chaser
+
+# Startup console menu
+print("====================================")
+print("       TAG AI - MODE SELECT         ")
+print("====================================")
+print("1. Training Mode (50 parallel pairs, auto-save every 5 gens)")
+print("2. 1v1 Mode (20s round, load trained models, no evolution)")
+mode_choice = input("Select mode (1 or 2): ").strip()
+
+is_training_mode = mode_choice != "2"
+population_size = 50 if is_training_mode else 1
+round_timer = 10 if is_training_mode else 20
+
+SIDEBAR_WIDTH = 220
+
+# Load all playable maps (maps/1.png, 2.png, ...) and cycle through them each round.
+map_paths = sorted(glob.glob(os.path.join("maps", "*.png")),
+                   key=lambda p: int(os.path.splitext(os.path.basename(p))[0]))
+current_map_index = 0
+map_surface = None
+map_mask = None
+
+
+def load_map(index):
+    global map_surface, map_mask
+    map_surface = pygame.image.load(map_paths[index % len(map_paths)]).convert_alpha()
+    map_mask = pygame.mask.from_surface(map_surface)
+
 
 pygame.init()
-
-WIDTH = 800
-HEIGHT = 600
-
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Tag")
+screen = pygame.display.set_mode((config.WIDTH + SIDEBAR_WIDTH, config.HEIGHT))
+pygame.display.set_caption("Tag - AI Co-Evolution" if is_training_mode else "Tag - 1v1 Evaluation")
 clock = pygame.time.Clock()
 
-# Chaser position and directions
-chaser_pos = pygame.math.Vector2(300, 400)
-chaser_dir = pygame.math.Vector2(1, 0)
-chaser_speed = 4
-turn_speed = 3
+load_map(0)
 
-# Setup (replace runner_x / runner_y)
-runner_pos = pygame.math.Vector2(300, 200)
-runner_dir = pygame.math.Vector2(-1, 0)  # Facing left initially
-runner_speed = 4
+# Win counters across all played rounds.
+# Runner wins by surviving the full round; Chaser wins by tagging the runner.
+round_stats = {"chaser_wins": 0, "runner_wins": 0}
 
-# Pretending that these are 2 outputs from the AI brain
-# values between -1 and 1, so I guess the AI uses the tanh graph to move positions.
-# outputs from chaser ai
-chaser_ai_output_x = 1
-chaser_ai_output_y = -1
-# outputs from runner ai
-runner_ai_output_x = 1
-runner_ai_output_y = -1
 
-# Ai vision, radar style. So 8 lines coming out of the circle at 45 degree angles. maximum distance is 300 px, and current distance is 0
-MAX_RADAR_DIST = 200
-STEP_SIZE = 2 # Seems like if you do it 5 or more, it would go through the chaser and the runner, and not collide
-NUM_RAYS = 8
-current_dist = 0
-radar_inputs = []
-VISION_CONE = [-30, -15, -5, 0, 5, 15, 30]
+def record_round_results():
+    for r in runners:
+        if getattr(r, 'alive', True):
+            round_stats["runner_wins"] += 1
+        else:
+            round_stats["chaser_wins"] += 1
 
-# Ai vision, cone of vision style.
-chaser_angle = 0
-runner_angle = 180
-turn_speed = 3
-
-# Loading the first map
-map_surface_1 = pygame.image.load("maps/map.png").convert_alpha()
-
-# Create a mask of solid pixels, so everything which is not transparent becomes solid.
-map_mask = pygame.mask.from_surface(map_surface_1)
-
-# the game resetting function
-chaser_score = 0
-runner_score = 0
-TIMER = 5 # for now 5 for testing purposes, until spawning in the map boxes is fixed.
-
-# The brains
-chaser_brain = nnet.SimpleNeuralNetwork(15)
-runner_brain = nnet.SimpleNeuralNetwork(15)
-
-font = pygame.font.SysFont("Arial", 20)
 
 def get_random_valid_pos(padding=15):
-    # koroche, this fixes the bug where the guys are spawning inside the walls of the map
     while True:
-        x = random.randint(padding, WIDTH - padding)
-        y = random.randint(padding, HEIGHT - padding)
-
-        #this makes sure if it's not inside a wall
+        x = random.randint(padding, config.WIDTH - padding)
+        y = random.randint(padding, config.HEIGHT - padding)
         if not map_mask.get_at((x, y)):
             return pygame.math.Vector2(x, y)
 
-def reset_game():
-    global chaser_pos, chaser_dir, runner_pos, runner_dir, start_time
 
-    # Reset chaser
-    chaser_pos = get_random_valid_pos()
-    chaser_dir = pygame.math.Vector2(1, 0)
+def spawn_chaser_near(runner_pos):
+    # Find a free spot in a ring around the runner so the chase is feasible.
+    for _ in range(200):
+        angle = random.uniform(0, 360)
+        radius = random.uniform(config.SPAWN_MIN_DIST, config.SPAWN_MAX_DIST)
+        candidate = runner_pos + pygame.math.Vector2(radius, 0).rotate(angle)
+        cx, cy = int(candidate.x), int(candidate.y)
+        if 0 < cx < config.WIDTH and 0 < cy < config.HEIGHT and not map_mask.get_at((cx, cy)):
+            return candidate
+    return get_random_valid_pos()
 
-    # Loop to make sure runner doesn't spawn inside of the chaser.
-    while True:
-        runner_pos = get_random_valid_pos()
-        if chaser_pos.distance_to(runner_pos) > 100:
-            break
 
-    # Reset runner
-    runner_dir = pygame.math.Vector2(-1, 0)
+def spawn_pair(chaser, runner):
+    # Runner spawns first, then the chaser is placed near it. The runner faces
+    # away from the chaser and the chaser faces straight at the runner.
+    r_pos = get_random_valid_pos()
+    c_pos = spawn_chaser_near(r_pos)
+
+    runner.pos = r_pos
+    runner.dir = (r_pos - c_pos).normalize() if r_pos != c_pos else pygame.math.Vector2(-1, 0)
+    runner.fitness = 0
+    runner.alive = True
+
+    chaser.pos = c_pos
+    chaser.dir = (r_pos - c_pos).normalize() if r_pos != c_pos else pygame.math.Vector2(1, 0)
+    chaser.fitness = 0
+    chaser.last_dist = c_pos.distance_to(r_pos)
+
+
+# create population
+chasers = [Chaser(get_random_valid_pos()) for _ in range(population_size)]
+runners = [Runner(get_random_valid_pos()) for _ in range(population_size)]
+for i in range(population_size):
+    spawn_pair(chasers[i], runners[i])
+start_time = pygame.time.get_ticks()
+total_trained_generations = 0
+
+
+def save_best_agents(gen_count):
+    best_runner = max(runners, key=lambda r: getattr(r, 'fitness', 0))
+    best_chaser = max(chasers, key=lambda c: getattr(c, 'fitness', 0))
+
+    with open("best_runner.pkl", "wb") as f:
+        pickle.dump(best_runner.brain, f)
+    with open("best_chaser.pkl", "wb") as f:
+        pickle.dump(best_chaser.brain, f)
+    with open("meta.pkl", "wb") as f:
+        pickle.dump({"generations": gen_count}, f)
+    print(f"[Auto-Save] Model weights saved at generation {gen_count}")
+
+
+def load_best_agents():
+    global total_trained_generations
+    if os.path.exists("best_runner.pkl") and os.path.exists("best_chaser.pkl"):
+        with open("best_runner.pkl", "rb") as f:
+            saved_runner_brain = pickle.load(f)
+        with open("best_chaser.pkl", "rb") as f:
+            saved_chaser_brain = pickle.load(f)
+
+        for r in runners:
+            r.brain = copy.deepcopy(saved_runner_brain)
+        for c in chasers:
+            c.brain = copy.deepcopy(saved_chaser_brain)
+
+        if os.path.exists("meta.pkl"):
+            with open("meta.pkl", "rb") as f:
+                meta = pickle.load(f)
+                total_trained_generations = meta.get("generations", 0)
+        print(f"Loaded trained models (Trained for {total_trained_generations} gens)")
+    else:
+        print("No saved models found! Running with fresh random weights.")
+
+
+if not is_training_mode:
+    load_best_agents()
+
+
+def reset_round():
+    global start_time, current_map_index
+    current_map_index = (current_map_index + 1) % len(map_paths)
+    load_map(current_map_index)
+    for i in range(population_size):
+        spawn_pair(chasers[i], runners[i])
 
     start_time = pygame.time.get_ticks()
 
-# resetting the game at the start
-start_time = pygame.time.get_ticks()
-reset_game()
 
-# Main loop
+def evolve_agents(population, agent_class):
+    population.sort(key=lambda a: getattr(a, 'fitness', 0), reverse=True)
+    num_elites = max(1, int(population_size * 0.2))
+    elites = population[:num_elites]
+
+    new_pop = []
+
+    for elite in elites:
+        clone = agent_class(get_random_valid_pos())
+        clone.brain.w1 = copy.deepcopy(elite.brain.w1)
+        clone.brain.b1 = copy.deepcopy(elite.brain.b1)
+        clone.brain.w2 = copy.deepcopy(elite.brain.w2)
+        clone.brain.b2 = copy.deepcopy(elite.brain.b2)
+        new_pop.append(clone)
+
+    while len(new_pop) < population_size:
+        parent = random.choice(elites)
+        child = agent_class(get_random_valid_pos())
+        child.brain.w1 = copy.deepcopy(parent.brain.w1)
+        child.brain.b1 = copy.deepcopy(parent.brain.b1)
+        child.brain.w2 = copy.deepcopy(parent.brain.w2)
+        child.brain.b2 = copy.deepcopy(parent.brain.b2)
+
+        if hasattr(child.brain, 'mutate'):
+            child.brain.mutate(mutation_rate=config.MUTATION_RATE, mutation_strength=config.MUTATION_STRENGTH)
+
+        new_pop.append(child)
+
+    return new_pop
+
+
+def evolve_population():
+    global chasers, runners, total_trained_generations
+    runners = evolve_agents(runners, Runner)
+    chasers = evolve_agents(chasers, Chaser)
+    config.generation += 1
+    total_trained_generations = config.generation
+
+    # Auto-save every 5 generations
+    if config.generation % 5 == 0:
+        save_best_agents(config.generation)
+
+    reset_round()
+
+
+def draw_sidebar():
+    # Non-playable stats panel on the left side of the window.
+    pygame.draw.rect(screen, (45, 45, 55), (0, 0, SIDEBAR_WIDTH, config.HEIGHT))
+    pygame.draw.line(screen, (90, 90, 100), (SIDEBAR_WIDTH, 0), (SIDEBAR_WIDTH, config.HEIGHT), 2)
+
+    title = config.font.render("WIN RATE", True, (255, 255, 255))
+    screen.blit(title, ((SIDEBAR_WIDTH - title.get_width()) // 2, 12))
+
+    total = round_stats["chaser_wins"] + round_stats["runner_wins"]
+    chaser_pct = round_stats["chaser_wins"] * 100.0 / total if total > 0 else 0.0
+    runner_pct = round_stats["runner_wins"] * 100.0 / total if total > 0 else 0.0
+
+    map_name = os.path.basename(map_paths[current_map_index])
+    map_text = config.font.render(f"Map: {map_name}", True, (200, 200, 210))
+    screen.blit(map_text, (14, 46))
+
+    def stat_block(y, role, color, pct):
+        pygame.draw.rect(screen, color, (14, y + 4, 12, 12))
+        label = config.font.render(role, True, (255, 255, 255))
+        screen.blit(label, (34, y))
+        pct_label = config.font.render(f"{pct:.0f}%", True, (255, 255, 255))
+        screen.blit(pct_label, (SIDEBAR_WIDTH - 14 - pct_label.get_width(), y))
+
+        # bar background + filled portion
+        bar_w = SIDEBAR_WIDTH - 28
+        bar_h = 14
+        pygame.draw.rect(screen, (70, 70, 80), (14, y + 26, bar_w, bar_h))
+        fill_w = int(bar_w * pct / 100.0)
+        if fill_w > 0:
+            pygame.draw.rect(screen, color, (14, y + 26, fill_w, bar_h))
+
+    stat_block(100, "Chaser", (255, 80, 80), chaser_pct)
+    stat_block(160, "Runner", (80, 120, 255), runner_pct)
+
+
+def draw_ray_lines(agent, opponent, clear_color, opponent_color):
+    # Visualises every radar ray for one agent (used in duel mode only).
+    ray_angles = [i * 45 for i in range(config.NUM_RAYS)] + config.VISION_CONE
+    ax = int(agent.pos.x) + SIDEBAR_WIDTH
+    ay = int(agent.pos.y)
+
+    for angle in ray_angles:
+        ray_dir = agent.dir.rotate(angle)
+        endpoint = agent.pos + ray_dir * config.MAX_RADAR_DIST
+        color = clear_color
+
+        d = config.STEP_SIZE
+        while d <= config.MAX_RADAR_DIST:
+            ray_pos = agent.pos + ray_dir * d
+            rx, ry = int(ray_pos.x), int(ray_pos.y)
+            if 0 <= rx < config.WIDTH and 0 <= ry < config.HEIGHT:
+                if map_mask.get_at((rx, ry)):
+                    endpoint = ray_pos
+                    color = (110, 110, 110)
+                    break
+            else:
+                endpoint = ray_pos
+                color = (110, 110, 110)
+                break
+            if ray_pos.distance_to(opponent.pos) < 10:
+                endpoint = ray_pos
+                color = opponent_color
+                break
+            d += config.STEP_SIZE
+
+        pygame.draw.line(screen, color, (ax, ay), (int(endpoint.x) + SIDEBAR_WIDTH, int(endpoint.y)), 1)
+
+
+# main loop
 running = True
 while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
 
-    # Drawing part (moved background blit top of frame so ray lines show properly)
     screen.fill('White')
-    screen.blit(map_surface_1, (0, 0))
+    screen.blit(map_surface, (SIDEBAR_WIDTH, 0))
 
-    chaser_inputs = []
-    runner_inputs = []
+    ray_angles = [i * 45 for i in range(config.NUM_RAYS)] + config.VISION_CONE
+    alive_runners = [r for r in runners if getattr(r, 'alive', True)]
 
-    # Chaser Vision Loop
-    for i in range(NUM_RAYS):
-        # Rotate ray relative to where the chaser is currently facing
-        ray_dir = chaser_dir.rotate(i * 45)
-        chaser_ray_pos = chaser_pos.copy()
-        while current_dist < MAX_RADAR_DIST:
-            current_dist += STEP_SIZE
-            chaser_ray_pos = chaser_pos + (ray_dir * current_dist)
-            # convert ray vector cords into integers, for mask lookup
-            chaser_ray_x = int(chaser_ray_pos.x)
-            chaser_ray_y = int(chaser_ray_pos.y)
-            # Wall collision check
-            if 0 <= chaser_ray_x < WIDTH and 0 <= chaser_ray_y < HEIGHT:
-                if map_mask.get_at((chaser_ray_x, chaser_ray_y)):
-                    break # hit a wall in the picture
-            else:
-                break # hit the screen border
-            # Distance check to runner using .distance_to()
-            if chaser_ray_pos.distance_to(runner_pos) < 10:
-                break
+    for i in range(population_size):
+        chaser = chasers[i]
+        runner = runners[i]
 
-        chaser_inputs.append((current_dist / MAX_RADAR_DIST))
-        pygame.draw.line(screen, (0, 255, 0), chaser_pos, chaser_ray_pos)
-        current_dist = 0
+        if not getattr(runner, 'alive', True):
+            continue
 
-    for angle in VISION_CONE:
-        # Rotate relative to chaser_dir heading
-        ray_dir = chaser_dir.rotate(angle)
-        chaser_ray_pos = chaser_pos.copy()
-        while current_dist < MAX_RADAR_DIST:
-            current_dist += STEP_SIZE
-            chaser_ray_pos = chaser_pos + (ray_dir * current_dist)
-            chaser_ray_x = int(chaser_ray_pos.x)
-            chaser_ray_y = int(chaser_ray_pos.y)
-            # Wall collision check
-            if 0 <= chaser_ray_x < WIDTH and 0 <= chaser_ray_y < HEIGHT:
-                if map_mask.get_at((chaser_ray_x, chaser_ray_y)):
-                    break  # hit a wall in the picture
-            if chaser_ray_pos.distance_to(runner_pos) < 10:
-                break
+        # 1. Chaser raycasting & movement
+        chaser_inputs = []
+        for angle in ray_angles:
+            ray_dir = chaser.dir.rotate(angle)
+            ray_pos = chaser.pos.copy()
+            current_dist = 0
+            wall_dist = 1.0
+            runner_dist = 1.0
 
-        chaser_inputs.append((current_dist / MAX_RADAR_DIST))
-        pygame.draw.line(screen, (255, 0, 255), chaser_pos, chaser_ray_pos)
-        current_dist = 0
+            while current_dist < config.MAX_RADAR_DIST:
+                current_dist += config.STEP_SIZE
+                ray_pos = chaser.pos + (ray_dir * current_dist)
+                rx, ry = int(ray_pos.x), int(ray_pos.y)
 
-    # Vision loop, and drawing rays for runner
-    for i in range(NUM_RAYS):
-        # Rotate ray relative to where the chaser is currently facing
-        ray_dir = runner_dir.rotate(i * 45)
-        runner_ray_pos = runner_pos.copy()
-        while current_dist < MAX_RADAR_DIST:
-            current_dist += STEP_SIZE
-            runner_ray_pos = runner_pos + (ray_dir * current_dist)
-            # convert ray vector cords into integers, for mask lookup
-            runner_ray_x = int(runner_ray_pos.x)
-            runner_ray_y = int(runner_ray_pos.y)
-            # Wall collision check
-            if 0 <= runner_ray_x < WIDTH and 0 <= runner_ray_y < HEIGHT:
-                if map_mask.get_at((runner_ray_x, runner_ray_y)):
-                    break # hit a wall in the picture
-            else:
-                break # hit the screen border
-            # Distance check to runner using .distance_to()
-            if runner_ray_pos.distance_to(chaser_pos) < 10:
-                break
+                if 0 <= rx < config.WIDTH and 0 <= ry < config.HEIGHT:
+                    if map_mask.get_at((rx, ry)):
+                        wall_dist = current_dist / config.MAX_RADAR_DIST
+                        break
+                else:
+                    wall_dist = current_dist / config.MAX_RADAR_DIST
+                    break
 
-        runner_inputs.append(current_dist / MAX_RADAR_DIST)
-        pygame.draw.line(screen, (0, 255, 0), runner_pos, runner_ray_pos)
-        current_dist = 0
+                if ray_pos.distance_to(runner.pos) < 10:
+                    runner_dist = current_dist / config.MAX_RADAR_DIST
+                    break
 
-    for angle in VISION_CONE:
-        # Rotate relative to runner_dir heading
-        ray_dir = runner_dir.rotate(angle)
-        runner_ray_pos = runner_pos.copy()
+            chaser_inputs.extend([wall_dist, runner_dist])
 
-        while current_dist < MAX_RADAR_DIST:
-            current_dist += STEP_SIZE
-            runner_ray_pos = runner_pos + (ray_dir * current_dist)
-            # convert ray vector cords into integers, for mask lookup
-            runner_ray_x = int(runner_ray_pos.x)
-            runner_ray_y = int(runner_ray_pos.y)
-            # Wall collision check
-            if 0 <= runner_ray_x < WIDTH and 0 <= runner_ray_y < HEIGHT:
-                if map_mask.get_at((runner_ray_x, runner_ray_y)):
-                    break  # hit a wall in the picture
-            if runner_ray_pos.distance_to(chaser_pos) < 10:
-                break
+        # Homing sense: relative direction to + distance from the runner.
+        dx = (runner.pos.x - chaser.pos.x) / config.WIDTH
+        dy = (runner.pos.y - chaser.pos.y) / config.HEIGHT
+        dist_norm = min(1.0, chaser.pos.distance_to(runner.pos) / config.MAX_RADAR_DIST)
+        chaser_inputs.extend([dx, dy, dist_norm])
 
-        runner_inputs.append(current_dist / MAX_RADAR_DIST)
-        pygame.draw.line(screen, (255, 0, 255), runner_pos, runner_ray_pos)
-        current_dist = 0
+        c_out_x, c_out_y = chaser.brain.forward(chaser_inputs)
+        chaser.dir.rotate_ip(c_out_y * config.chaser_turn_speed)
+        chaser_next = chaser.pos + chaser.dir * (c_out_x * config.chaser_speed)
+        cnx, cny = int(chaser_next.x), int(chaser_next.y)
 
-    # Pass inputs to neural networks
-    chaser_ai_output_x, chaser_ai_output_y = chaser_brain.forward(chaser_inputs)
-    runner_ai_output_x, runner_ai_output_y = runner_brain.forward(runner_inputs)
+        # wall penalty for chaser
+        if 0 <= cnx < config.WIDTH and 0 <= cny < config.HEIGHT and not map_mask.get_at((cnx, cny)):
+            chaser.pos = chaser_next
+        else:
+            chaser.fitness -= 5.0
 
-    # Rotate direction vector
-    chaser_dir.rotate_ip(chaser_ai_output_y * turn_speed)
-    # AI movement logic for chaser
-    # Calculate where the chaser wants to move
-    chaser_next_pos = chaser_pos + chaser_dir * (chaser_ai_output_x * chaser_speed)
-    cnx = int(chaser_next_pos.x)
-    cny = int(chaser_next_pos.y)
-    # Only move if the next pixel isn't inside a solid wall
-    if 0 <= cnx < WIDTH and 0 <= cny < HEIGHT:
-        if not map_mask.get_at((cnx, cny)):
-            chaser_pos = chaser_next_pos
-    # keep within boundaries
-    chaser_pos.x = max(10, min(WIDTH - 10, chaser_pos.x))
-    chaser_pos.y = max(10, min(HEIGHT - 10, chaser_pos.y))
+        chaser.pos.x = max(10, min(config.WIDTH - 10, chaser.pos.x))
+        chaser.pos.y = max(10, min(config.HEIGHT - 10, chaser.pos.y))
 
-    # Rotate direction vector
-    runner_dir.rotate_ip(runner_ai_output_y * turn_speed)
-    # Runner AI movement logic
-    # Calculate where the runner wants to move
-    runner_next_pos = runner_pos + runner_dir * (runner_ai_output_x * runner_speed)
-    rnx = int(runner_next_pos.x)
-    rny = int(runner_next_pos.y)
-    # Only move if the next pixel isn't inside a solid wall
-    if 0 <= rnx < WIDTH and 0 <= rny < HEIGHT:
-        if not map_mask.get_at((rnx, rny)):
-            runner_pos = runner_next_pos
-    runner_pos.x = max(10, min(WIDTH - 10, runner_pos.x))
-    runner_pos.y = max(10, min(HEIGHT - 10, runner_pos.y))
+        # 2. Runner raycasting & movement
+        runner_inputs = []
+        for angle in ray_angles:
+            ray_dir = runner.dir.rotate(angle)
+            ray_pos = runner.pos.copy()
+            current_dist = 0
+            wall_dist = 1.0
+            chaser_dist = 1.0
 
-    # Win condition, if the chaser manages to touch the runner. Or runner survives the 20 seconds duration
+            while current_dist < config.MAX_RADAR_DIST:
+                current_dist += config.STEP_SIZE
+                ray_pos = runner.pos + (ray_dir * current_dist)
+                rx, ry = int(ray_pos.x), int(ray_pos.y)
+
+                if 0 <= rx < config.WIDTH and 0 <= ry < config.HEIGHT:
+                    if map_mask.get_at((rx, ry)):
+                        wall_dist = current_dist / config.MAX_RADAR_DIST
+                        break
+                else:
+                    wall_dist = current_dist / config.MAX_RADAR_DIST
+                    break
+
+                if ray_pos.distance_to(chaser.pos) < 10:
+                    chaser_dist = current_dist / config.MAX_RADAR_DIST
+                    break
+
+            runner_inputs.extend([wall_dist, chaser_dist])
+
+        r_out_x, r_out_y = runner.brain.forward(runner_inputs)
+        runner.dir.rotate_ip(r_out_y * config.turn_speed)
+        runner_next = runner.pos + runner.dir * (r_out_x * config.runner_speed)
+        rnx, rny = int(runner_next.x), int(runner_next.y)
+
+        # wall penalty for runner
+        if 0 <= rnx < config.WIDTH and 0 <= rny < config.HEIGHT and not map_mask.get_at((rnx, rny)):
+            runner.pos = runner_next
+        else:
+            runner.fitness -= 10.0
+
+        runner.pos.x = max(10, min(config.WIDTH - 10, runner.pos.x))
+        runner.pos.y = max(10, min(config.HEIGHT - 10, runner.pos.y))
+
+        # fitness & tag collision
+        runner.fitness += 1.0
+
+        # Chaser reward is shaped by proximity: +10 when super close, -10 when too far.
+        dist = chaser.pos.distance_to(runner.pos)
+        close_dist = 50.0
+        far_dist = float(config.MAX_RADAR_DIST)
+        closeness = max(0.0, min(1.0, (far_dist - dist) / (far_dist - close_dist)))
+        chaser.fitness += -10.0 + 20.0 * closeness
+
+        # Bonus for actually closing the gap since the last tick (dense pursuit reward).
+        if chaser.last_dist is not None:
+            gap_closed = chaser.last_dist - dist
+            if gap_closed > 0:
+                chaser.fitness += config.CLOSE_PROGRESS_REWARD * min(gap_closed, 8.0)
+        chaser.last_dist = dist
+
+        if dist < 20:
+            runner.alive = False
+            seconds_left = round_timer - (pygame.time.get_ticks() - start_time) / 1000.0
+            chaser.fitness += config.TAG_BASE_REWARD + config.TAG_EARLY_BONUS_PER_SEC * max(0.0, seconds_left)
+
+        # draw rays in duel mode
+        if not is_training_mode:
+            draw_ray_lines(chaser, runner, (255, 180, 60), (0, 0, 255))
+            draw_ray_lines(runner, chaser, (60, 220, 90), (255, 60, 60))
+
+        # draw agents
+        pygame.draw.circle(screen, (0, 0, 255), (int(runner.pos.x) + SIDEBAR_WIDTH, int(runner.pos.y)), 10)
+        pygame.draw.circle(screen, (255, 0, 0), (int(chaser.pos.x) + SIDEBAR_WIDTH, int(chaser.pos.y)), 10)
+
+    # round timer
     elapsed_seconds = (pygame.time.get_ticks() - start_time) / 1000
-    time_remaining = max(0, int(TIMER - elapsed_seconds))
+    time_remaining = max(0, int(round_timer - elapsed_seconds))
 
-    if chaser_pos.distance_to(runner_pos) < 20:
-        chaser_score += 1
-        print(f"Chaser won. Score, Runner: {runner_score}. Chaser {chaser_score}")
-        reset_game()
+    if time_remaining <= 0 or len(alive_runners) == 0:
+        record_round_results()
+        if is_training_mode:
+            evolve_population()
+        else:
+            reset_round()
 
-    elif time_remaining <= 0:
-        runner_score += 1
-        print(f"Runner survived. Score, Runner: {runner_score}. Chaser {chaser_score}")
-        reset_game()
+    # HUD display
+    if is_training_mode:
+        hud_str = f"TRAINING MODE | Gen: {config.generation} | Alive: {len(alive_runners)}/{population_size} | Time: {time_remaining}s"
+    else:
+        hud_str = f"1v1 EVALUATION MODE | Trained Generations: {total_trained_generations} | Time: {time_remaining}s"
 
-    # Chaser
-    pygame.draw.circle(screen, (255, 0, 0), chaser_pos, 10)
-    # Runner
-    pygame.draw.circle(screen, (0, 0, 255), runner_pos, 10)
+    hud_text = config.font.render(hud_str, True, (0, 0, 0))
+    screen.blit(hud_text, (SIDEBAR_WIDTH + 10, 10))
 
-    # timer and scoreboard
-    timer_text = font.render(f"Time: {time_remaining}", True, (0, 0, 0))
-    score_text = font.render(f"Chaser: {chaser_score}  |  Runner: {runner_score}", True, (0, 0, 0))
+    draw_sidebar()
 
-    screen.blit(timer_text, (WIDTH // 2 - timer_text.get_width() // 2, 10))
-    score_rect = score_text.get_rect(topright=(WIDTH - 10, 10))
-    screen.blit(score_text, score_rect)
-
-    # update the screen
     pygame.display.flip()
     clock.tick(60)
 
